@@ -2,6 +2,8 @@
 
 LLM Frontend for Power Users
 
+Add Story Telling Mode
+
 ## Resources
 
 - GitHub: <https://github.com/SillyTavern/SillyTavern>
