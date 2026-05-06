@@ -1,6 +1,8 @@
 /* eslint-disable dot-notation */
 import process from 'node:process';
 import util from 'node:util';
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import fetch from 'node-fetch';
 import urlJoin from 'url-join';
@@ -105,6 +107,63 @@ const cachingAtDepth = (() => {
     return Number.isInteger(value) && value >= 0 ? value : -1;
 })();
 const enableAdaptiveThinking = getConfigValue('claude.enableAdaptiveThinking', true, 'boolean');
+
+/**
+ * Configuration for API request/response logging
+ */
+const ENABLE_API_LOGGING = getConfigValue('openai.enableApiLogging', false, 'boolean');
+const API_LOG_DIR = path.join(process.cwd(), 'logs', 'api-requests');
+
+/**
+ * Saves API request and response data to log files
+ * @param {object} requestData - The request data sent to the API
+ * @param {object} responseData - The response data received from the API
+ * @param {string} apiSource - The API source (e.g., 'openai', 'claude')
+ * @param {string} model - The model used
+ */
+function saveApiLog(requestData, responseData, apiSource, model) {
+    if (!ENABLE_API_LOGGING) {
+        return;
+    }
+
+    try {
+        // Create log directory if it doesn't exist
+        if (!fs.existsSync(API_LOG_DIR)) {
+            fs.mkdirSync(API_LOG_DIR, { recursive: true });
+        }
+
+        // Generate timestamp and filename
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const safeModel = (model || 'unknown').replace(/[^a-z0-9_-]/gi, '_');
+        const filename = `${timestamp}_${apiSource}_${safeModel}.json`;
+        const filepath = path.join(API_LOG_DIR, filename);
+
+        // Prepare log data
+        const logData = {
+            timestamp: new Date().toISOString(),
+            api_source: apiSource,
+            model: model,
+            request: {
+                url: requestData.url,
+                method: requestData.method,
+                headers: requestData.headers,
+                body: requestData.body,
+            },
+            response: {
+                status: responseData.status,
+                statusText: responseData.statusText,
+                headers: responseData.headers,
+                body: responseData.body,
+            },
+        };
+
+        // Write to file
+        fs.writeFileSync(filepath, JSON.stringify(logData, null, 2), 'utf-8');
+        console.log(`[API Log] Saved to: ${filepath}`);
+    } catch (error) {
+        console.error('[API Log] Failed to save log:', error.message);
+    }
+}
 
 /**
  * Cache for cacheable (writing) OpenRouter model IDs.
@@ -1107,20 +1166,51 @@ async function sendDeepSeekRequest(request, response) {
 
         console.debug('DeepSeek request:', requestBody);
 
+        // Save request to log file
+        const apiSource = 'deepseek';
+        const requestDataForLog = {
+            url: apiUrl + '/chat/completions',
+            method: 'POST',
+            headers: config.headers,
+            body: requestBody,
+        };
+
         const generateResponse = await fetch(apiUrl + '/chat/completions', config);
 
         if (request.body.stream) {
-            await forwardFetchResponse(generateResponse, response);
-        } else {
-            if (!generateResponse.ok) {
-                const errorText = await generateResponse.text();
-                console.warn(`DeepSeek API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
-                const errorJson = tryParse(errorText) ?? { error: true };
-                return response.status(500).send(errorJson);
-            }
+            console.info('Streaming request in progress');
+            return await forwardFetchResponse(generateResponse, response);
+        }
+
+        if (generateResponse.ok) {
             const generateResponseJson = await generateResponse.json();
             console.debug('DeepSeek response:', generateResponseJson);
+
+            // Save response to log file
+            const responseDataForLog = {
+                status: generateResponse.status,
+                statusText: generateResponse.statusText,
+                headers: Object.fromEntries(generateResponse.headers.entries()),
+                body: generateResponseJson,
+            };
+            saveApiLog(requestDataForLog, responseDataForLog, apiSource, request.body.model);
+
             return response.send(generateResponseJson);
+        } else {
+            const errorText = await generateResponse.text();
+            console.warn(`DeepSeek API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
+            const errorJson = tryParse(errorText) ?? { error: true };
+
+            // Save error response to log file
+            const errorResponseDataForLog = {
+                status: generateResponse.status,
+                statusText: generateResponse.statusText,
+                headers: Object.fromEntries(generateResponse.headers.entries()),
+                body: errorJson || errorText,
+            };
+            saveApiLog(requestDataForLog, errorResponseDataForLog, apiSource, request.body.model);
+
+            return response.status(500).send(errorJson);
         }
     } catch (error) {
         console.error('Error communicating with DeepSeek API: ', error);
@@ -2587,6 +2677,15 @@ router.post('/generate', async function (request, response) {
 
         console.debug('Chat Completion request:', requestBody);
 
+        // Save request to log file
+        const apiSource = request.body.chat_completion_source || 'unknown';
+        const requestDataForLog = {
+            url: endpointUrl,
+            method: 'POST',
+            headers: config.headers,
+            body: requestBody,
+        };
+
         const fetchResponse = await fetch(endpointUrl, config);
 
         if (request.body.stream) {
@@ -2598,6 +2697,16 @@ router.post('/generate', async function (request, response) {
             /** @type {any} */
             const json = await fetchResponse.json();
             console.debug('Chat Completion response:', json);
+
+            // Save response to log file
+            const responseDataForLog = {
+                status: fetchResponse.status,
+                statusText: fetchResponse.statusText,
+                headers: Object.fromEntries(fetchResponse.headers.entries()),
+                body: json,
+            };
+            saveApiLog(requestDataForLog, responseDataForLog, apiSource, request.body.model);
+
             return response.send(json);
         } else {
             const responseText = await fetchResponse.text();
@@ -2606,6 +2715,15 @@ router.post('/generate', async function (request, response) {
             const message = fetchResponse.statusText || 'Unknown error occurred';
             const quota_error = fetchResponse.status === 429 && errorData?.error?.type === 'insufficient_quota';
             console.error('Chat completion request error: ', message, responseText);
+
+            // Save error response to log file
+            const errorResponseDataForLog = {
+                status: fetchResponse.status,
+                statusText: fetchResponse.statusText,
+                headers: Object.fromEntries(fetchResponse.headers.entries()),
+                body: errorData || responseText,
+            };
+            saveApiLog(requestDataForLog, errorResponseDataForLog, apiSource, request.body.model);
 
             if (!response.headersSent) {
                 response.send({ error: { message }, quota_error: quota_error });

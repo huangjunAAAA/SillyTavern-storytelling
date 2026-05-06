@@ -8942,6 +8942,7 @@ export async function setCharacterSettingsOverrides() {
     const scenarioOverrideValue = chat_metadata.scenario || '';
     const exampleMessagesValue = chat_metadata.mes_example || '';
     const systemPromptValue = chat_metadata.system_prompt || '';
+    const reasoningPromptValue = chat_metadata.reasoning_prompt || '';
     const isGroup = !!selected_group;
 
     const $template = $(await renderTemplateAsync('scenarioOverride'));
@@ -8951,6 +8952,7 @@ export async function setCharacterSettingsOverrides() {
         scenario: scenarioOverrideValue,
         examples: exampleMessagesValue,
         system_prompt: systemPromptValue,
+        reasoning_prompt: reasoningPromptValue,
     };
 
     // Keep edits local until the popup is closed/confirmed
@@ -8966,6 +8968,10 @@ export async function setCharacterSettingsOverrides() {
     $systemPrompt.val(systemPromptValue).on('input', function () {
         pendingChanges.system_prompt = String($(this).val());
     });
+    const $reasoningPrompt = $template.find('.chat_reasoning_prompt');
+    $reasoningPrompt.val(reasoningPromptValue).on('input', function () {
+        pendingChanges.reasoning_prompt = String($(this).val());
+    });
 
     $template.find('.remove_scenario_override').on('click', async function () {
         const confirm = await Popup.show.confirm(t`Are you sure you want to remove all overrides?`, t`This action cannot be undone.`);
@@ -8979,6 +8985,8 @@ export async function setCharacterSettingsOverrides() {
         pendingChanges.examples = '';
         $systemPrompt.val('');
         pendingChanges.system_prompt = '';
+        $reasoningPrompt.val('');
+        pendingChanges.reasoning_prompt = '';
     });
 
     // Wait for popup close/confirm.
@@ -8991,6 +8999,7 @@ export async function setCharacterSettingsOverrides() {
     chat_metadata.scenario = pendingChanges.scenario;
     chat_metadata.mes_example = pendingChanges.examples;
     chat_metadata.system_prompt = pendingChanges.system_prompt;
+    chat_metadata.reasoning_prompt = pendingChanges.reasoning_prompt;
     await saveMetadata();
 }
 

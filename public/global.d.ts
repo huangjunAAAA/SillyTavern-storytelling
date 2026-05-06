@@ -33,7 +33,7 @@ declare global {
         generation_mode?: number;
         generation_mode_join_prefix?: string;
         generation_mode_join_suffix?: string;
-        activation_strategy?: number;
+        activation_strategy?: number;   // 0=NATURAL, 1=LIST, 2=MANUAL, 3=POOLED, 4=REASONING
         auto_mode_delay?: number;
         allow_self_responses?: boolean;
         avatar_url?: string;

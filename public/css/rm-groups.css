@@ -186,6 +186,104 @@
     filter: drop-shadow(0px 0px 5px rgb(243, 166, 65));
 }
 
+#rm_group_members .group_member:not(.act_as) .right_menu_button[data-action="act_as"] {
+    opacity: 0.4;
+    filter: brightness(0.5);
+    transition: all var(--animation-duration-2x) ease-in-out;
+}
+
+#rm_group_members .group_member:not(.act_as) .right_menu_button[data-action="act_as"]:hover {
+    opacity: inherit;
+    filter: drop-shadow(0px 0px 5px rgb(76, 175, 80));
+}
+
+#rm_group_members .group_member.act_as .right_menu_button[data-action="unact_as"] {
+    filter: drop-shadow(0px 0px 5px rgb(76, 175, 80));
+}
+
+/* Green border for act_as members in right panel */
+#rm_group_members .group_member.act_as {
+    border: 2px solid rgb(76, 175, 80);
+    box-shadow: 0 0 5px rgba(76, 175, 80, 0.4);
+}
+
+/* act_as button in input area */
+#actAsMenuButton {
+    order: 5;
+    display: none;
+    padding: 1px;
+    opacity: 0.4;
+    filter: brightness(0.5);
+    transition: all var(--animation-duration-2x) ease-in-out;
+}
+
+#actAsMenuButton:hover {
+    opacity: inherit;
+    filter: drop-shadow(0px 0px 5px rgb(76, 175, 80));
+}
+
+#actAsMenuButton.act_as_active {
+    opacity: 1;
+    filter: drop-shadow(0px 0px 5px rgb(76, 175, 80));
+}
+
+/* Act-as popup dialog styles */
+.act_as_popup h3 {
+    color: var(--text-color);
+    text-align: center;
+}
+
+.act_as_popup_item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.15s ease;
+    border: 2px solid transparent;
+    min-height: 48px;
+}
+
+.act_as_popup_item:hover {
+    background: var(--white30a, rgba(255, 255, 255, 0.1));
+}
+
+.act_as_popup_item.act_as_popup_selected {
+    border-color: rgb(76, 175, 80);
+    background: rgba(76, 175, 80, 0.15);
+}
+
+.act_as_popup_avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.act_as_popup_name {
+    flex: 1;
+    font-size: 1em;
+    color: var(--text-color);
+}
+
+.act_as_popup_badge {
+    font-size: 0.75em;
+    color: rgb(76, 175, 80);
+    background: rgba(76, 175, 80, 0.2);
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+}
+
+.act_as_popup_hint {
+    text-align: center;
+    padding: 20px 10px;
+    color: var(--grey50, #999);
+    font-style: italic;
+}
+
 
 #rm_group_members .right_menu_button[data-action="speak"]:hover {
     opacity: inherit;
@@ -196,7 +294,9 @@
 #rm_group_add_members .right_menu_button:not([data-action="add"], [data-action="view"]),
 #rm_group_members .right_menu_button[data-action="add"],
 #rm_group_members .group_member.disabled .right_menu_button[data-action="disable"],
-#rm_group_members .group_member:not(.disabled) .right_menu_button[data-action="enable"] {
+#rm_group_members .group_member:not(.disabled) .right_menu_button[data-action="enable"],
+#rm_group_members .group_member.act_as .right_menu_button[data-action="act_as"],
+#rm_group_members .group_member:not(.act_as) .right_menu_button[data-action="unact_as"] {
     display: none;
 }
 

@@ -1,4 +1,4 @@
-// native node modules
+ // native node modules
 import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
@@ -416,6 +416,27 @@ async function postSetupTasks(result) {
     }
 
     setWindowTitle('SillyTavern WebServer');
+
+    // Print API logging status and create log directory if needed
+    const apiLoggingEnabled = getConfigValue('openai.enableApiLogging', false, 'boolean');
+    const apiLogDir = path.join(process.cwd(), 'logs', 'api-requests');
+    console.log();
+    console.log('API Request Logging:', apiLoggingEnabled ? color.green('ENABLED') : color.yellow('DISABLED'));
+    if (apiLoggingEnabled) {
+        // Auto-create log directory if it doesn't exist
+        if (!fs.existsSync(apiLogDir)) {
+            try {
+                fs.mkdirSync(apiLogDir, { recursive: true });
+                console.log('API Log Directory:', color.cyan(apiLogDir), color.green('(created)'));
+            } catch (error) {
+                console.log('API Log Directory:', color.cyan(apiLogDir));
+                console.error(color.red('Failed to create log directory:'), error.message);
+            }
+        } else {
+            console.log('API Log Directory:', color.cyan(apiLogDir));
+        }
+    }
+    console.log();
 
     let logListen = 'SillyTavern is listening on';
 

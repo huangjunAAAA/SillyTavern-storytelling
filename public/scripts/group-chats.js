@@ -79,11 +79,13 @@ import {
     unshallowCharacter,
     chatElement,
     ensureMessageMediaIsArray,
+    generateRaw,
+    name1,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect, printTagFilters, tag_filter_type } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
 import { isExternalMediaAllowed } from './chats.js';
-import { POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
+import { POPUP_TYPE, POPUP_RESULT, Popup, callGenericPopup } from './popup.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { compressRequest } from './request-compression.js';
@@ -124,6 +126,7 @@ export const group_activation_strategy = {
     LIST: 1,
     MANUAL: 2,
     POOLED: 3,
+    REASONING: 4,
 };
 
 export const group_generation_mode = {
@@ -611,6 +614,7 @@ async function getFirstCharacterMessage(character) {
 function resetSelectedGroup() {
     selected_group = null;
     is_group_generating = false;
+    $('#actAsMenuButton').css('display', 'none').removeClass('act_as_active');
 }
 
 /**
@@ -943,6 +947,36 @@ function getGroupChatNames(groupId) {
  * @returns {Promise<string|void>} Generated text or nothing if no generation occurred
  */
 async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
+    /**
+     * Sends a message as an act_as character using the AI message format
+     * (is_user: false), with chat.push() + addOneMessage(), matching the
+     * same flow as a regular AI-generated message.
+     * @param {string} text The message text
+     * @param {string} actAsAvatar The avatar ID of the act_as character
+     */
+    async function sendActAsMessage(text, actAsAvatar) {
+        const actAsChar = characters.find(c => c.avatar === actAsAvatar);
+        if (!actAsChar) return;
+
+        const mes = {};
+        mes.is_user = false;
+        mes.is_system = false;
+        mes.name = actAsChar.name;
+        mes.send_date = getMessageTimeStamp();
+        mes.original_avatar = actAsAvatar;
+        mes.mes = substituteParams(text.trim(), { name2Override: actAsChar.name });
+        mes.force_avatar = actAsAvatar !== 'none'
+            ? getThumbnailUrl('avatar', actAsAvatar)
+            : default_avatar;
+        mes.extra = { gen_id: group_generation_id };
+
+        chat.push(mes);
+        const chatId = chat.length - 1;
+        await eventSource.emit(event_types.MESSAGE_RECEIVED, chatId, 'act_as');
+        addOneMessage(mes);
+        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chatId, 'act_as');
+    }
+
     function throwIfAborted() {
         if (params.signal instanceof AbortSignal && params.signal.aborted) {
             throw new Error('AbortSignal was fired. Group generation stopped');
@@ -1028,14 +1062,107 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
             activatedMembers = activatePooledOrder(enabledMembers, lastMessage, isUserInput);
         } else if (activationStrategy === group_activation_strategy.MANUAL && !isUserInput) {
             activatedMembers = shuffle(enabledMembers).slice(0, 1).map(x => characters.findIndex(y => y.avatar === x)).filter(x => x !== -1);
+        } else if (activationStrategy === group_activation_strategy.REASONING) {
+            const reasoningResult = await activateReasoningOrder(enabledMembers, lastMessage, group);
+            if (reasoningResult.isUser) {
+                // Store the chosen speaker name for act_as popup pre-selection
+                if (reasoningResult.speakerName) {
+                    chat_metadata.next_speaker = reasoningResult.speakerName;
+                    updateChatMetadata(chat_metadata);
+                }
+
+                if (isUserInput) {
+                    // User has already typed a message - save it as the acted character, then continue to find next speaker
+                    const actAsAvatar = chat_metadata.act_as_selected || '';
+                    if (actAsAvatar) {
+                        await sendActAsMessage(userInput, actAsAvatar);
+                    } else {
+                        const bias = getBiasStrings(userInput, type);
+                        await sendMessageAsUser(userInput, bias.messageBias);
+                    }
+                    await saveChatConditional();
+                    $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
+
+                    // Clear next_speaker hint
+                    if (chat_metadata.next_speaker) {
+                        delete chat_metadata.next_speaker;
+                        updateChatMetadata(chat_metadata);
+                    }
+
+                    // Now determine the next AI speaker after the user's message
+                    const updatedLastMessage = chat[chat.length - 1];
+                    const secondReasoningResult = await activateReasoningOrder(enabledMembers, updatedLastMessage, group);
+                    if (secondReasoningResult.isUser) {
+                        // Still the user's turn - stop and notify
+                        if (secondReasoningResult.speakerName) {
+                            chat_metadata.next_speaker = secondReasoningResult.speakerName;
+                            updateChatMetadata(chat_metadata);
+                        }
+                        if (is_group_automode_enabled) {
+                            is_group_automode_enabled = false;
+                            $('#rm_group_automode').prop('checked', false);
+                            if (groupAutoModeAbortController) {
+                                groupAutoModeAbortController.abort();
+                            }
+                        }
+                        toastr.info(
+                            substituteParams(t`It's your turn to speak, {{user}}.`),
+                            t`User Turn`,
+                            { timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: false },
+                        );
+                        is_group_generating = false;
+                        setSendButtonState(false);
+                        setCharacterId(undefined);
+                        setCharacterName('');
+                        activateSendButtons();
+                        showSwipeButtons();
+                        return Promise.resolve();
+                    }
+                    activatedMembers = secondReasoningResult.chIds;
+                } else {
+                    // No user input - it's the user's turn, stop and notify
+                    if (is_group_automode_enabled) {
+                        is_group_automode_enabled = false;
+                        $('#rm_group_automode').prop('checked', false);
+                        if (groupAutoModeAbortController) {
+                            groupAutoModeAbortController.abort();
+                        }
+                    }
+                    toastr.info(
+                        substituteParams(t`It's your turn to speak, {{user}}.`),
+                        t`User Turn`,
+                        { timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: false },
+                    );
+                    is_group_generating = false;
+                    setSendButtonState(false);
+                    setCharacterId(undefined);
+                    setCharacterName('');
+                    activateSendButtons();
+                    showSwipeButtons();
+                    return Promise.resolve();
+                }
+            } else {
+                activatedMembers = reasoningResult.chIds;
+            }
         }
 
         if (activatedMembers.length === 0) {
             //toastr.warning('All group members are disabled. Enable at least one to get a reply.');
 
+            // Clear next_speaker hint once user sends a message
+            if (chat_metadata.next_speaker) {
+                delete chat_metadata.next_speaker;
+                updateChatMetadata(chat_metadata);
+            }
+
             // Send user message as is
             const bias = getBiasStrings(userInput, type);
-            await sendMessageAsUser(userInput, bias.messageBias);
+            const actAsAvatar = chat_metadata.act_as_selected || '';
+            if (actAsAvatar) {
+                await sendActAsMessage(userInput, actAsAvatar);
+            } else {
+                await sendMessageAsUser(userInput, bias.messageBias);
+            }
             await saveChatConditional();
             $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
         }
@@ -1313,6 +1440,246 @@ function activateNaturalOrder(members, input, lastMessage, allowSelfResponses, i
         .map((x) => characters.findIndex((y) => y.avatar === x))
         .filter((x) => x !== -1);
     return memberIds;
+}
+
+/**
+ * Adds a character to a group by their avatar ID.
+ * @param {Group} group The group to add the character to
+ * @param {string} avatarId The avatar ID of the character to add
+ * @returns {Promise<void>}
+ */
+async function addMemberToGroup(group, avatarId) {
+    if (group.members.includes(avatarId)) {
+        return;
+    }
+    group.members.unshift(avatarId);
+    // Remove from disabled list if present
+    const disabledIndex = group.disabled_members.indexOf(avatarId);
+    if (disabledIndex !== -1) {
+        group.disabled_members.splice(disabledIndex, 1);
+    }
+    await editGroup(group.id, false, false);
+    await unshallowGroupMembers(group.id);
+    if (openGroupId === group.id) {
+        updateGroupAvatar(group);
+        printGroupCandidates();
+        printGroupMembers();
+    }
+}
+
+/**
+ * Creates a new character card by querying the LLM for character attributes.
+ * @param {string} charName The name of the character to create
+ * @returns {Promise<string|null>} The avatar ID of the created character, or null on failure
+ */
+async function createCharacterViaLLM(charName) {
+    try {
+        const createPrompt = [
+            { role: 'system', content: `你正在为一个角色扮演故事创建新角色卡。用JSON格式生成角色属性，包含以下字段:
+- "description": 角色的详细描述（外貌、背景、习惯特征）
+- "personality": 性格简要概述
+- "scenario": 这个角色如何融入故事场景
+- "first_mes": 这个角色首次出现时会说什么
+- "mes_example": 这个角色对话风格的示例
+
+只回复一个有效的JSON对象。不要包含任何其他文字。` },
+            { role: 'user', content: `为以下角色创建角色卡: ${charName}` },
+        ];
+
+        const jsonSchema = {
+            type: 'object',
+            properties: {
+                description: { type: 'string' },
+                personality: { type: 'string' },
+                scenario: { type: 'string' },
+                first_mes: { type: 'string' },
+                mes_example: { type: 'string' },
+            },
+            required: ['description', 'personality', 'scenario', 'first_mes', 'mes_example'],
+        };
+
+        const rawResponse = await generateRaw({
+            prompt: createPrompt,
+            systemPrompt: '',
+            jsonSchema: jsonSchema,
+        });
+
+        let charData;
+        try {
+            charData = JSON.parse(rawResponse);
+        } catch {
+            // Try to extract JSON from the response
+            const jsonMatch = rawResponse.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                charData = JSON.parse(jsonMatch[0]);
+            } else {
+                throw new Error('Failed to parse character data from LLM response');
+            }
+        }
+
+        // Create the character via the server API
+        const formData = new FormData();
+        formData.append('ch_name', charName);
+        formData.append('description', charData.description || '');
+        formData.append('personality', charData.personality || '');
+        formData.append('scenario', charData.scenario || '');
+        formData.append('first_mes', charData.first_mes || '');
+        formData.append('mes_example', charData.mes_example || '');
+        formData.append('file_name', charName);
+
+        const response = await fetch('/api/characters/create', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: formData,
+        });
+
+        if (!response.ok) {
+            throw new Error(`Character creation API returned ${response.status}`);
+        }
+
+        const avatarId = await response.text();
+        await getCharacters();
+        console.log(`REASONING strategy: Created new character "${charName}" (avatar: ${avatarId})`);
+        return avatarId;
+    } catch (error) {
+        console.error('REASONING strategy: Failed to create character via LLM', error);
+        toastr.warning(t`Failed to create character "${charName}" automatically`);
+        return null;
+    }
+}
+
+/**
+ * Uses LLM reasoning to decide which character should speak next in a group chat.
+ * @param {string[]} enabledMembers Array of enabled member avatar IDs
+ * @param {object} lastMessage The last chat message object
+ * @param {Group} group The group object
+ * @returns {Promise<{chIds: number[], isUser: boolean}>} Character indices and whether it's the user's turn
+ */
+async function activateReasoningOrder(enabledMembers, lastMessage, group) {
+    // Build chat history context (filter out system messages, keep story-relevant messages)
+    const maxMessages = 30;
+    const storyMessages = chat
+        .filter(m => !m.is_system || m.extra?.type === system_message_types.NARRATOR)
+        .slice(-maxMessages);
+
+    const chatHistory = storyMessages.map(m => {
+        const speakerName = m.is_user ? name1 : (m.name || 'Unknown');
+        return `${speakerName}: ${m.mes}`;
+    }).join('\n');
+
+    // Build list of current group member names
+    const memberNames = enabledMembers
+        .map(avatar => characters.find(c => c.avatar === avatar)?.name)
+        .filter(Boolean);
+
+    const defaultSystemPrompt = `你是一个群组角色扮演的故事导演，负责决定下一个说话的角色。
+根据对话历史和当前角色列表，判断接下来应该是谁说话。
+你也可以引入一个新角色（如果剧情需要），说出新角色的名字即可。
+只回复下一个应该说话的角色的名字。不要解释，不要引号，只回复名字。
+如果轮到用户（{{user}}）说话了，请只回复"{{user}}"。
+当前群组成员: ${memberNames.join(', ')}`;
+
+    const customPrompt = chat_metadata.reasoning_prompt || '';
+    const systemPrompt = customPrompt
+        ? `${customPrompt}\n当前群组成员: ${memberNames.join(', ')}`
+        : defaultSystemPrompt;
+
+    const userPrompt = chatHistory || '(No conversation yet)';
+
+    try {
+        const response = await generateRaw({
+            prompt: userPrompt,
+            systemPrompt: substituteParams(systemPrompt),
+        });
+
+        const chosenName = response.trim();
+
+        if (!chosenName) {
+            console.warn('REASONING strategy: LLM returned empty response, falling back to random');
+            return { chIds: shuffle([...enabledMembers]).slice(0, 1).map(x => characters.findIndex(y => y.avatar === x)).filter(x => x !== -1), isUser: false };
+        }
+
+        // Check if LLM says it's the user's turn
+        if (chosenName.toLowerCase() === name1.toLowerCase()) {
+            console.log('REASONING strategy: LLM says it is the user\'s turn');
+            return { chIds: [], isUser: true, speakerName: name1 };
+        }
+
+        function isActedByUser(avatar) {
+            return Array.isArray(chat_metadata.act_as) && chat_metadata.act_as.includes(avatar);
+        }
+
+        // Check if the name matches an enabled group member
+        for (const avatar of enabledMembers) {
+            const character = characters.find(c => c.avatar === avatar);
+            if (character && character.name.toLowerCase() === chosenName.toLowerCase()) {
+                if (isActedByUser(avatar)) {
+                    console.log(`REASONING strategy: "${character.name}" is acted by user, stopping`);
+                    return { chIds: [], isUser: true, speakerName: character.name };
+                }
+                const chId = characters.findIndex(c => c.avatar === avatar);
+                console.log(`REASONING strategy: Selected existing group member "${character.name}"`);
+                return { chIds: [chId], isUser: false };
+            }
+        }
+
+        // Check if the name matches a disabled group member
+        for (const avatar of group.disabled_members) {
+            const character = characters.find(c => c.avatar === avatar);
+            if (character && character.name.toLowerCase() === chosenName.toLowerCase()) {
+                // Enable the member and return them
+                const disabledIndex = group.disabled_members.indexOf(avatar);
+                if (disabledIndex !== -1) {
+                    group.disabled_members.splice(disabledIndex, 1);
+                    await editGroup(group.id, false, false);
+                }
+                const chId = characters.findIndex(c => c.avatar === avatar);
+                if (isActedByUser(avatar)) {
+                    console.log(`REASONING strategy: "${character.name}" is acted by user, stopping`);
+                    return { chIds: [], isUser: true, speakerName: character.name };
+                }
+                console.log(`REASONING strategy: Re-enabled disabled member "${character.name}"`);
+                return { chIds: [chId], isUser: false };
+            }
+        }
+
+        // Check if the name matches any character in the database
+        const existingCharacter = characters.find(c => c.name.toLowerCase() === chosenName.toLowerCase());
+        if (existingCharacter) {
+            if (isActedByUser(existingCharacter.avatar)) {
+                console.log(`REASONING strategy: "${existingCharacter.name}" is acted by user, stopping`);
+                return { chIds: [], isUser: true, speakerName: existingCharacter.name };
+            }
+            // Add existing character to the group
+            await addMemberToGroup(group, existingCharacter.avatar);
+            const chId = characters.findIndex(c => c.avatar === existingCharacter.avatar);
+            console.log(`REASONING strategy: Added existing character "${existingCharacter.name}" to the group`);
+            return { chIds: [chId], isUser: false };
+        }
+
+        // Character not found anywhere - create via LLM
+        console.log(`REASONING strategy: Character "${chosenName}" not found, creating via LLM`);
+        const newAvatarId = await createCharacterViaLLM(chosenName);
+        if (newAvatarId) {
+            await addMemberToGroup(group, newAvatarId);
+            if (isActedByUser(newAvatarId)) {
+                console.log(`REASONING strategy: "${chosenName}" is acted by user, stopping`);
+                return { chIds: [], isUser: true, speakerName: chosenName };
+            }
+            const chId = characters.findIndex(c => c.avatar === newAvatarId);
+            if (chId !== -1) {
+                console.log(`REASONING strategy: Created and added new character "${chosenName}" to the group`);
+                return { chIds: [chId], isUser: false };
+            }
+        }
+
+        // Fallback: pick a random enabled member
+        console.warn('REASONING strategy: Could not resolve speaker, falling back to random');
+        return { chIds: shuffle([...enabledMembers]).slice(0, 1).map(x => characters.findIndex(y => y.avatar === x)).filter(x => x !== -1), isUser: false };
+    } catch (error) {
+        console.error('REASONING strategy: Error during LLM reasoning', error);
+        return { chIds: shuffle([...enabledMembers]).slice(0, 1).map(x => characters.findIndex(y => y.avatar === x)).filter(x => x !== -1), isUser: false };
+    }
 }
 
 /**
@@ -1709,6 +2076,8 @@ function getGroupCharacterBlock(character) {
     }
 
     template.toggleClass('disabled', isGroupMemberDisabled(character.avatar));
+    const isActAs = Array.isArray(chat_metadata.act_as) && chat_metadata.act_as.includes(character.avatar);
+    template.toggleClass('act_as', isActAs);
 
     // Display inline tags
     const tagsElement = template.find('.tags');
@@ -1718,6 +2087,8 @@ function getGroupCharacterBlock(character) {
         template.find('[data-action="speak"]').hide();
         template.find('[data-action="enable"]').hide();
         template.find('[data-action="disable"]').hide();
+        template.find('[data-action="act_as"]').hide();
+        template.find('[data-action="unact_as"]').hide();
     }
 
     return template;
@@ -1731,6 +2102,163 @@ function getGroupCharacterBlock(character) {
 function isGroupMemberDisabled(avatarId) {
     const thisGroup = openGroupId && groups.find((x) => x.id == openGroupId);
     return Boolean(thisGroup && thisGroup.disabled_members.includes(avatarId));
+}
+
+/**
+ * Updates the act_as button visual state based on current selection.
+ */
+export function updateActAsDropdown() {
+    const button = $('#actAsMenuButton');
+    if (!button.length) return;
+
+    // Validate that act_as_selected is still in act_as array
+    const actAsMembers = Array.isArray(chat_metadata.act_as) ? chat_metadata.act_as : [];
+    if (chat_metadata.act_as_selected && !actAsMembers.includes(chat_metadata.act_as_selected)) {
+        chat_metadata.act_as_selected = '';
+        updateChatMetadata(chat_metadata);
+    }
+
+    const isSelected = !!chat_metadata.act_as_selected;
+    button.toggleClass('act_as_active', isSelected);
+}
+
+function initActAsMenu() {
+    // Create button in leftSendForm
+    const buttonHTML = '<div id="actAsMenuButton" class="fa-solid fa-masks-theater interactable" title="选择扮演角色" style="display:none;"></div>';
+    $('#leftSendForm').append(buttonHTML);
+
+    const button = $('#actAsMenuButton');
+
+    button.on('click', async function (e) {
+        e.stopPropagation();
+        await showActAsPopup();
+    });
+
+    // Prevent mousedown/touchstart from propagating to the global drawer-close handler
+    button.on('mousedown touchstart', function (e) {
+        e.stopPropagation();
+    });
+}
+
+/**
+ * Shows a popup dialog for selecting which act_as character to speak as.
+ * Lists only characters that are in the act_as state.
+ * Pre-selects the LLM's next speaker suggestion if available.
+ */
+async function showActAsPopup() {
+    const group = groups.find(x => x.id === selected_group);
+    if (!group) return;
+
+    // Get act_as members
+    const actAsMembers = Array.isArray(chat_metadata.act_as) ? chat_metadata.act_as : [];
+
+    // Build the popup content
+    const container = document.createElement('div');
+    container.classList.add('act_as_popup');
+
+    const title = document.createElement('h3');
+    title.textContent = '选择扮演角色';
+    title.style.marginBottom = '10px';
+    container.appendChild(title);
+
+    // Determine the next speaker for pre-selection
+    const nextSpeakerName = chat_metadata.next_speaker || '';
+    let defaultAvatar = chat_metadata.act_as_selected || '';
+
+    // If no current selection but we have a next speaker, try to match it
+    if (!defaultAvatar && nextSpeakerName) {
+        const matchedChar = characters.find(c =>
+            actAsMembers.includes(c.avatar) && c.name.toLowerCase() === nextSpeakerName.toLowerCase()
+        );
+        if (matchedChar) {
+            defaultAvatar = matchedChar.avatar;
+        }
+    }
+
+    // Track current selection
+    let selectedAvatar = defaultAvatar;
+
+    // "None" option
+    const noneOption = document.createElement('div');
+    noneOption.classList.add('act_as_popup_item');
+    if (!selectedAvatar) noneOption.classList.add('act_as_popup_selected');
+    noneOption.dataset.avatar = '';
+
+    const noneName = document.createElement('span');
+    noneName.textContent = '无（不扮演）';
+    noneOption.appendChild(noneName);
+
+    noneOption.addEventListener('click', function () {
+        selectedAvatar = '';
+        container.querySelectorAll('.act_as_popup_item').forEach(el => el.classList.remove('act_as_popup_selected'));
+        this.classList.add('act_as_popup_selected');
+    });
+    container.appendChild(noneOption);
+
+    // Add act_as members
+    for (const avatar of actAsMembers) {
+        const char = characters.find(c => c.avatar === avatar);
+        if (!char) continue;
+
+        const item = document.createElement('div');
+        item.classList.add('act_as_popup_item');
+        item.dataset.avatar = avatar;
+        if (selectedAvatar === avatar) item.classList.add('act_as_popup_selected');
+
+        // Show next speaker indicator
+        const isNextSpeaker = nextSpeakerName && char.name.toLowerCase() === nextSpeakerName.toLowerCase();
+
+        const avatarImg = document.createElement('img');
+        avatarImg.src = getThumbnailUrl('avatar', avatar);
+        avatarImg.classList.add('act_as_popup_avatar');
+        item.appendChild(avatarImg);
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = char.name;
+        nameSpan.classList.add('act_as_popup_name');
+        item.appendChild(nameSpan);
+
+        if (isNextSpeaker) {
+            const badge = document.createElement('span');
+            badge.textContent = '下一个';
+            badge.classList.add('act_as_popup_badge');
+            item.appendChild(badge);
+        }
+
+        item.addEventListener('click', function () {
+            selectedAvatar = avatar;
+            container.querySelectorAll('.act_as_popup_item').forEach(el => el.classList.remove('act_as_popup_selected'));
+            this.classList.add('act_as_popup_selected');
+        });
+        container.appendChild(item);
+    }
+
+    // If no act_as members, show a hint
+    if (actAsMembers.length === 0) {
+        const hint = document.createElement('div');
+        hint.classList.add('act_as_popup_hint');
+        hint.textContent = '暂无扮演角色，请在右侧成员列表中点击扮演按钮添加。';
+        container.appendChild(hint);
+    }
+
+    const popup = new Popup(container, POPUP_TYPE.TEXT, '', {
+        okButton: '确定',
+        cancelButton: '取消',
+        allowVerticalScrolling: true,
+    });
+
+    const result = await popup.show();
+
+    if (result === POPUP_RESULT.AFFIRMATIVE) {
+        // Update the selection
+        chat_metadata.act_as_selected = selectedAvatar || '';
+        // Clear next_speaker hint after selection
+        delete chat_metadata.next_speaker;
+        updateChatMetadata(chat_metadata);
+        await saveChatConditional();
+        updateActAsDropdown();
+        printGroupMembers();
+    }
 }
 
 async function onDeleteGroupClick() {
@@ -1879,6 +2407,14 @@ function select_group_chats(groupId, skipAnimation) {
     }
 
     hideMutedSprites = group?.hideMutedSprites ?? false;
+
+    // Show/hide act_as menu button
+    if (group) {
+        $('#actAsMenuButton').css('display', 'flex');
+        updateActAsDropdown();
+    } else {
+        $('#actAsMenuButton').css('display', 'none');
+    }
     $('#rm_group_hidemutedsprites').prop('checked', hideMutedSprites);
 
     eventSource.emit('groupSelected', { detail: { id: openGroupId, group: group } });
@@ -1999,6 +2535,38 @@ async function onGroupActionClick(event) {
         }
     }
 
+    if (action === 'act_as') {
+        const avatarId = member.data('id');
+        if (!chat_metadata.act_as) chat_metadata.act_as = [];
+        if (!chat_metadata.act_as.includes(avatarId)) {
+            chat_metadata.act_as.push(avatarId);
+            member.addClass('act_as');
+        }
+        updateChatMetadata(chat_metadata);
+        await saveChatConditional();
+        updateActAsDropdown();
+        printGroupMembers();
+    }
+
+    if (action === 'unact_as') {
+        const avatarId = member.data('id');
+        if (chat_metadata.act_as) {
+            const index = chat_metadata.act_as.indexOf(avatarId);
+            if (index !== -1) {
+                chat_metadata.act_as.splice(index, 1);
+                member.removeClass('act_as');
+            }
+        }
+        // Clear act_as_selected if the removed character was selected
+        if (chat_metadata.act_as_selected === avatarId) {
+            chat_metadata.act_as_selected = '';
+        }
+        updateChatMetadata(chat_metadata);
+        await saveChatConditional();
+        updateActAsDropdown();
+        printGroupMembers();
+    }
+
     await eventSource.emit(event_types.GROUP_UPDATED);
 }
 
@@ -2038,6 +2606,8 @@ export async function openGroupById(groupId) {
             selected_group = groupId;
             setEditedMessageId(undefined);
             updateChatMetadata({}, true);
+            $('#actAsMenuButton').css('display', 'flex');
+            updateActAsDropdown();
             await getGroupChat(groupId);
             return true;
         }
@@ -2487,4 +3057,5 @@ jQuery(() => {
     $('#group_avatar_button').on('input', uploadGroupAvatar);
     $('#rm_group_restore_avatar').on('click', restoreGroupAvatar);
     $(document).on('click', '.group_member .right_menu_button', onGroupActionClick);
+    initActAsMenu();
 });
