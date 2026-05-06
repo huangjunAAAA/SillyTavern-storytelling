@@ -1123,12 +1123,25 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
                             }
                         }
                         toastr.info(
-                            substituteParams(t`It's your turn to speak, {{user}}.`),
+                            t`It's your turn to speak as ${secondReasoningResult.speakerName || 'yourself'}, ${name1}`,
                             t`User Turn`,
-                            { timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: false },
+                            { timeOut: 10000, extendedTimeOut: 5000, closeButton: true, tapToDismiss: false },
                         );
                         is_group_generating = false;
                         setSendButtonState(false);
+                        // Auto-select act_as character based on LLM's speaker choice
+                        const autoSelectCharA = secondReasoningResult.speakerName
+                            ? characters.find(c => c.name === secondReasoningResult.speakerName || c.avatar === secondReasoningResult.speakerName)
+                            : null;
+                        if (autoSelectCharA) {
+                            if (!chat_metadata.act_as) chat_metadata.act_as = [];
+                            if (!chat_metadata.act_as.includes(autoSelectCharA.avatar)) {
+                                chat_metadata.act_as.push(autoSelectCharA.avatar);
+                            }
+                            chat_metadata.act_as_selected = autoSelectCharA.avatar;
+                            updateChatMetadata(chat_metadata);
+                            updateActAsDropdown();
+                        }
                         setCharacterId(undefined);
                         setCharacterName('');
                         activateSendButtons();
@@ -1146,12 +1159,25 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
                         }
                     }
                     toastr.info(
-                        substituteParams(t`It's your turn to speak, {{user}}.`),
+                        t`It's your turn to speak as ${reasoningResult.speakerName || 'yourself'}, ${name1}`,
                         t`User Turn`,
                         { timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: false },
                     );
                     is_group_generating = false;
                     setSendButtonState(false);
+                    // Auto-select act_as character based on LLM's speaker choice
+                    const autoSelectCharB = reasoningResult.speakerName
+                        ? characters.find(c => c.name === reasoningResult.speakerName || c.avatar === reasoningResult.speakerName)
+                        : null;
+                    if (autoSelectCharB) {
+                        if (!chat_metadata.act_as) chat_metadata.act_as = [];
+                        if (!chat_metadata.act_as.includes(autoSelectCharB.avatar)) {
+                            chat_metadata.act_as.push(autoSelectCharB.avatar);
+                        }
+                        chat_metadata.act_as_selected = autoSelectCharB.avatar;
+                        updateChatMetadata(chat_metadata);
+                        updateActAsDropdown();
+                    }
                     setCharacterId(undefined);
                     setCharacterName('');
                     activateSendButtons();
@@ -2159,23 +2185,13 @@ function initActAsMenu() {
     const button = $('#actAsMenuButton');
 
     button.on('click', async function (e) {
-        console.log('[actAsMenu] click event triggered on button');
-        console.log('[actAsMenu] Event target:', e.target);
-        console.log('[actAsMenu] Current right panel state:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
         e.stopPropagation();
-        console.log('[actAsMenu] stopPropagation() called for click');
         await showActAsPopup();
     });
 
     // Prevent mousedown/touchstart from propagating to the global drawer-close handler
     button.on('mousedown touchstart', function (e) {
-        console.log(`[actAsMenu] ${e.type} event triggered on button`);
-        console.log('[actAsMenu] Event target:', e.target);
-        console.log('[actAsMenu] Button element:', this);
-        console.log('[actAsMenu] Parent #leftSendForm:', $('#leftSendForm').length > 0 ? 'EXISTS' : 'NOT FOUND');
-        console.log('[actAsMenu] Right panel before event:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
         e.stopPropagation();
-        console.log('[actAsMenu] stopPropagation() called for', e.type);
     });
 }
 
@@ -2185,9 +2201,6 @@ function initActAsMenu() {
  * Pre-selects the LLM's next speaker suggestion if available.
  */
 async function showActAsPopup() {
-    console.log('[actAsMenu] showActAsPopup() called');
-    console.log('[actAsMenu] Right panel state before popup:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
-    
     const group = groups.find(x => x.id === selected_group);
     if (!group) return;
 
@@ -2283,20 +2296,13 @@ async function showActAsPopup() {
         container.appendChild(hint);
     }
 
-    console.log('[actAsMenu] Creating Popup object');
     const popup = new Popup(container, POPUP_TYPE.TEXT, '', {
         okButton: '确定',
         cancelButton: '取消',
         allowVerticalScrolling: true,
     });
 
-    console.log('[actAsMenu] Calling popup.show()');
-    console.log('[actAsMenu] Right panel state before popup.show():', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
-    
     const result = await popup.show();
-    
-    console.log('[actAsMenu] Popup closed with result:', result);
-    console.log('[actAsMenu] Right panel state after popup:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
 
     if (result === POPUP_RESULT.AFFIRMATIVE) {
         // Update the selection
@@ -2656,8 +2662,9 @@ export async function openGroupById(groupId) {
             setEditedMessageId(undefined);
             updateChatMetadata({}, true);
             $('#actAsMenuButton').css('display', 'flex');
-            updateActAsDropdown();
             await getGroupChat(groupId);
+            updateActAsDropdown();
+            printGroupMembers();
             return true;
         }
     }
@@ -2825,6 +2832,8 @@ export async function openGroupChat(groupId, chatId) {
 
     await editGroup(groupId, true, false);
     await getGroupChat(groupId);
+    updateActAsDropdown();
+    printGroupMembers();
 }
 
 /**

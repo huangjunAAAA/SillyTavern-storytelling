@@ -12098,22 +12098,6 @@ jQuery(async function () {
 
     $('html').on('touchstart mousedown', async function (e) {
         const clickTarget = $(e.target);
-        
-        // DEBUG: Log events related to actAsMenuButton and right panel
-        const isDebugTarget = clickTarget.closest('#actAsMenuButton').length > 0 || 
-                              clickTarget.closest('#right-nav-panel').length > 0 ||
-                              clickTarget.closest('#leftSendForm').length > 0;
-        
-        if (isDebugTarget) {
-            console.log('[drawer-close] Global handler triggered by:', e.type);
-            console.log('[drawer-close] Event target:', e.target);
-            console.log('[drawer-close] Target tag/class:', e.target.tagName, e.target.className);
-            console.log('[drawer-close] Click target jQuery:', clickTarget);
-            console.log('[drawer-close] Is actAsMenuButton?', clickTarget.closest('#actAsMenuButton').length > 0);
-            console.log('[drawer-close] Is inside #leftSendForm?', clickTarget.closest('#leftSendForm').length > 0);
-            console.log('[drawer-close] Is inside #right-nav-panel?', clickTarget.closest('#right-nav-panel').length > 0);
-            console.log('[drawer-close] Right panel state BEFORE:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
-        }
 
         if (isExportPopupOpen
             && clickTarget.closest('#export_button').length == 0
@@ -12137,46 +12121,18 @@ jQuery(async function () {
 
         for (const id of forbiddenTargets) {
             if (clickTarget.closest(id).length > 0) {
-                if (isDebugTarget) {
-                    console.log('[drawer-close] MATCHED forbidden target:', id);
-                    console.log('[drawer-close] Early return - drawer will NOT close');
-                }
                 return;
             }
         }
 
         // This autocloses open drawers that are not pinned if a click happens inside the app which does not target them.
         const targetParentHasOpenDrawer = clickTarget.parents('.openDrawer').length;
-        
-        if (isDebugTarget) {
-            console.log('[drawer-close] targetParentHasOpenDrawer:', targetParentHasOpenDrawer);
-            console.log('[drawer-close] Has drawer-icon class?', clickTarget.hasClass('drawer-icon'));
-            console.log('[drawer-close] Has openDrawer class?', clickTarget.hasClass('openDrawer'));
-            console.log('[drawer-close] Open drawers count:', $('.openDrawer').not('.pinnedOpen').length);
-        }
-        
         if (!clickTarget.hasClass('drawer-icon') && !clickTarget.hasClass('openDrawer')) {
             const $openDrawers = $('.openDrawer').not('.pinnedOpen');
             if ($openDrawers.length && targetParentHasOpenDrawer === 0) {
-                if (isDebugTarget) {
-                    console.log('[drawer-close] ⚠️ WILL CLOSE drawers!');
-                    console.log('[drawer-close] Drawers to close:', $openDrawers.map(function() { return this.id; }).get());
-                }
                 // Toggle icon and drawer classes
                 $('.openIcon').not('.drawerPinnedOpen').toggleClass('closedIcon openIcon');
                 $openDrawers.toggleClass('closedDrawer openDrawer');
-                
-                if (isDebugTarget) {
-                    console.log('[drawer-close] Right panel state AFTER:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
-                }
-            } else {
-                if (isDebugTarget) {
-                    console.log('[drawer-close] No drawers will be closed (conditions not met)');
-                }
-            }
-        } else {
-            if (isDebugTarget) {
-                console.log('[drawer-close] Clicked on drawer-icon or openDrawer - no action');
             }
         }
     });
