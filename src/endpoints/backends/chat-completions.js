@@ -115,7 +115,14 @@ const ENABLE_API_LOGGING = getConfigValue('openai.enableApiLogging', false, 'boo
 const API_LOG_DIR = path.join(process.cwd(), 'logs', 'api-requests');
 
 /**
- * Saves API request and response data to log files
+ * Cache for file write streams by date
+ * @type {Map<string, fs.WriteStream>}
+ */
+const logFileStreams = new Map();
+
+/**
+ * Saves API request and response data to log files (async, non-blocking)
+ * Groups logs by date into a single file per day
  * @param {object} requestData - The request data sent to the API
  * @param {object} responseData - The response data received from the API
  * @param {string} apiSource - The API source (e.g., 'openai', 'claude')
@@ -132,15 +139,15 @@ function saveApiLog(requestData, responseData, apiSource, model) {
             fs.mkdirSync(API_LOG_DIR, { recursive: true });
         }
 
-        // Generate timestamp and filename
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const safeModel = (model || 'unknown').replace(/[^a-z0-9_-]/gi, '_');
-        const filename = `${timestamp}_${apiSource}_${safeModel}.json`;
+        // Generate date-based filename (YYYY-MM-DD)
+        const now = new Date();
+        const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+        const filename = `${dateStr}.jsonl`; // JSON Lines format
         const filepath = path.join(API_LOG_DIR, filename);
 
-        // Prepare log data
-        const logData = {
-            timestamp: new Date().toISOString(),
+        // Prepare log entry as a single line (JSON Lines format)
+        const logEntry = {
+            timestamp: now.toISOString(),
             api_source: apiSource,
             model: model,
             request: {
@@ -157,11 +164,24 @@ function saveApiLog(requestData, responseData, apiSource, model) {
             },
         };
 
-        // Write to file
-        fs.writeFileSync(filepath, JSON.stringify(logData, null, 2), 'utf-8');
-        console.log(`[API Log] Saved to: ${filepath}`);
+        // Convert to JSON line
+        const logLine = JSON.stringify(logEntry) + '\n';
+
+        // Use setImmediate to defer file I/O to next event loop tick (non-blocking)
+        setImmediate(() => {
+            try {
+                // Append to file asynchronously
+                fs.appendFile(filepath, logLine, 'utf-8', (err) => {
+                    if (err) {
+                        console.error('[API Log] Failed to append log:', err.message);
+                    }
+                });
+            } catch (error) {
+                console.error('[API Log] Failed to schedule log write:', error.message);
+            }
+        });
     } catch (error) {
-        console.error('[API Log] Failed to save log:', error.message);
+        console.error('[API Log] Failed to prepare log:', error.message);
     }
 }
 

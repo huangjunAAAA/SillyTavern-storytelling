@@ -1037,6 +1037,28 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
         const enabledMembers = group.members.filter(x => !group.disabled_members.includes(x));
         let activatedMembers = [];
 
+        // When user has typed input with act_as selected, save it as the acted character
+        // BEFORE running the strategy. The LLM's choice is only a reference.
+        if (isUserInput && chat_metadata.act_as_selected) {
+            const actAsAvatar = chat_metadata.act_as_selected;
+            await sendActAsMessage(userInput, actAsAvatar);
+            await saveChatConditional();
+            $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
+
+            // Clear next_speaker hint
+            if (chat_metadata.next_speaker) {
+                delete chat_metadata.next_speaker;
+                updateChatMetadata(chat_metadata);
+            }
+
+            // Update context for the strategy — the last message is now the act_as message
+            isUserInput = false;
+            const newLastMessage = chat[chat.length - 1];
+            if (newLastMessage && !newLastMessage.is_system) {
+                activationText = newLastMessage.mes;
+            }
+        }
+
         if (params && typeof params.force_chid == 'number') {
             activatedMembers = [params.force_chid];
         } else if (type === 'quiet') {
@@ -1065,21 +1087,16 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
         } else if (activationStrategy === group_activation_strategy.REASONING) {
             const reasoningResult = await activateReasoningOrder(enabledMembers, lastMessage, group);
             if (reasoningResult.isUser) {
-                // Store the chosen speaker name for act_as popup pre-selection
+                // Store LLM's speaker choice as reference for act_as popup pre-selection
                 if (reasoningResult.speakerName) {
                     chat_metadata.next_speaker = reasoningResult.speakerName;
                     updateChatMetadata(chat_metadata);
                 }
 
                 if (isUserInput) {
-                    // User has already typed a message - save it as the acted character, then continue to find next speaker
-                    const actAsAvatar = chat_metadata.act_as_selected || '';
-                    if (actAsAvatar) {
-                        await sendActAsMessage(userInput, actAsAvatar);
-                    } else {
-                        const bias = getBiasStrings(userInput, type);
-                        await sendMessageAsUser(userInput, bias.messageBias);
-                    }
+                    // User typed without act_as selected — send as normal user message, then find next speaker
+                    const bias = getBiasStrings(userInput, type);
+                    await sendMessageAsUser(userInput, bias.messageBias);
                     await saveChatConditional();
                     $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
 
@@ -1089,11 +1106,11 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
                         updateChatMetadata(chat_metadata);
                     }
 
-                    // Now determine the next AI speaker after the user's message
+                    // Determine the next AI speaker after the user's message
                     const updatedLastMessage = chat[chat.length - 1];
                     const secondReasoningResult = await activateReasoningOrder(enabledMembers, updatedLastMessage, group);
                     if (secondReasoningResult.isUser) {
-                        // Still the user's turn - stop and notify
+                        // Still the user's turn — stop and notify
                         if (secondReasoningResult.speakerName) {
                             chat_metadata.next_speaker = secondReasoningResult.speakerName;
                             updateChatMetadata(chat_metadata);
@@ -1120,7 +1137,7 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
                     }
                     activatedMembers = secondReasoningResult.chIds;
                 } else {
-                    // No user input - it's the user's turn, stop and notify
+                    // No user input — LLM says it's the user's turn, stop auto-mode and notify
                     if (is_group_automode_enabled) {
                         is_group_automode_enabled = false;
                         $('#rm_group_automode').prop('checked', false);
@@ -1148,6 +1165,18 @@ async function generateGroupWrapper(byAutoMode, type = null, params = {}) {
 
         if (activatedMembers.length === 0) {
             //toastr.warning('All group members are disabled. Enable at least one to get a reply.');
+
+            // If the textarea is empty, the message was already handled (e.g., by act_as pre-processing).
+            // Nothing more to do — stop here.
+            if (!String($('#send_textarea').val()).trim()) {
+                is_group_generating = false;
+                setSendButtonState(false);
+                setCharacterId(undefined);
+                setCharacterName('');
+                activateSendButtons();
+                showSwipeButtons();
+                return Promise.resolve();
+            }
 
             // Clear next_speaker hint once user sends a message
             if (chat_metadata.next_speaker) {
@@ -2130,13 +2159,23 @@ function initActAsMenu() {
     const button = $('#actAsMenuButton');
 
     button.on('click', async function (e) {
+        console.log('[actAsMenu] click event triggered on button');
+        console.log('[actAsMenu] Event target:', e.target);
+        console.log('[actAsMenu] Current right panel state:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
         e.stopPropagation();
+        console.log('[actAsMenu] stopPropagation() called for click');
         await showActAsPopup();
     });
 
     // Prevent mousedown/touchstart from propagating to the global drawer-close handler
     button.on('mousedown touchstart', function (e) {
+        console.log(`[actAsMenu] ${e.type} event triggered on button`);
+        console.log('[actAsMenu] Event target:', e.target);
+        console.log('[actAsMenu] Button element:', this);
+        console.log('[actAsMenu] Parent #leftSendForm:', $('#leftSendForm').length > 0 ? 'EXISTS' : 'NOT FOUND');
+        console.log('[actAsMenu] Right panel before event:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
         e.stopPropagation();
+        console.log('[actAsMenu] stopPropagation() called for', e.type);
     });
 }
 
@@ -2146,6 +2185,9 @@ function initActAsMenu() {
  * Pre-selects the LLM's next speaker suggestion if available.
  */
 async function showActAsPopup() {
+    console.log('[actAsMenu] showActAsPopup() called');
+    console.log('[actAsMenu] Right panel state before popup:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
+    
     const group = groups.find(x => x.id === selected_group);
     if (!group) return;
 
@@ -2241,13 +2283,20 @@ async function showActAsPopup() {
         container.appendChild(hint);
     }
 
+    console.log('[actAsMenu] Creating Popup object');
     const popup = new Popup(container, POPUP_TYPE.TEXT, '', {
         okButton: '确定',
         cancelButton: '取消',
         allowVerticalScrolling: true,
     });
 
+    console.log('[actAsMenu] Calling popup.show()');
+    console.log('[actAsMenu] Right panel state before popup.show():', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
+    
     const result = await popup.show();
+    
+    console.log('[actAsMenu] Popup closed with result:', result);
+    console.log('[actAsMenu] Right panel state after popup:', $('#right-nav-panel').hasClass('openDrawer') ? 'OPEN' : 'CLOSED');
 
     if (result === POPUP_RESULT.AFFIRMATIVE) {
         // Update the selection
